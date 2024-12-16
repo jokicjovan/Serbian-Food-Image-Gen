@@ -102,7 +102,7 @@ pages = 10
 with ThreadPoolExecutor() as executor:
     executor.map(process_page, range(pages))
 
-with open("data_recepti/recepti.json", "w") as file:
+with open("data_recepti/recepti.json", "w", encoding="utf-8") as file:
     file.write(str(dishes).replace("'", "\""))
 
 print(f"Execution time for {16*pages} images: {time.time() - start_time} seconds")
