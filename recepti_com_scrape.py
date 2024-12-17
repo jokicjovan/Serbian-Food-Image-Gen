@@ -1,5 +1,9 @@
 import requests
+import time
 from bs4 import BeautifulSoup
+from PIL import Image
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 class Dish:
     def __init__(self, name=None, ingredients=None, preparation=None, image_path=None):
@@ -45,31 +49,60 @@ class Dish:
     @image_path.setter
     def image_path(self, image_path):
         self.__image_path = image_path
-    
+
+    def make_json(self):
+        return {
+            "name": self.name,
+            "ingredients": self.ingredients,
+            "preparation": self.preparation,
+            "image_path": self.image_path
+        }
 
 
-pageCounter = 0
+dishes = {
+    "dishes": []
+}
+dishes_lock = threading.Lock()
 
-for pageCounter in range(1):
-    # URL of the page you want to scrape
-    url = 'https://www.recepti.com/kuvar/glavna-jela/' + str(pageCounter * 16 + 1)
+def process_page(pageCounter):
+    main_url = "https://www.recepti.com"
+    image_folder = "images/"
+    url = main_url + '/kuvar/glavna-jela/' + str(pageCounter * 16 + 1)
 
-    # Send a GET request to the URL
     response = requests.get(url)
-
-    # Check if the request was successful
     if response.status_code == 200:
-        # Parse the HTML content of the page
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # find all li items from ul tag with class re-list
         ul = soup.find('ul', class_='re-list')
         li_dishes = ul.find_all('li')
         for li_dish in li_dishes:
             dish = Dish()
-            title = li_dish.find('a').text
-            print(title)
-            break
-        exit()
+            dish.name = li_dish.find('a').text
+
+            img = li_dish.find('img')
+            dish.image_path = image_folder + dish.name.replace(" ", "_").lower() + ".jpg"
+            image = Image.open(requests.get(main_url + img['src'], stream=True).raw)
+            image.save("data_recepti/" + dish.image_path)
+
+            dish_url = main_url + li_dish.find('a')['href']
+            dish_response = requests.get(dish_url)
+            dish_soup = BeautifulSoup(dish_response.content, 'html.parser')
+            li_ingridients = dish_soup.findAll('li', itemprop='ingredients')
+            dish.ingredients = [li.text.replace("\n", "").strip().replace("\"", "") for li in li_ingridients]
+            li_instructions = dish_soup.findAll('li', itemprop='recipeInstructions')
+            dish.preparation = [li.text.replace("\n", "").strip().replace("\"", "") for li in li_instructions]
+            
+            with dishes_lock:
+                dishes["dishes"].append(dish.make_json())
     else:
         print(f"Failed to retrieve the page. Status code: {response.status_code}")
+
+start_time = time.time()
+pages = 10
+
+with ThreadPoolExecutor() as executor:
+    executor.map(process_page, range(pages))
+
+with open("data_recepti/recepti.json", "w", encoding="utf-8") as file:
+    file.write(str(dishes).replace("'", "\""))
+
+print(f"Execution time for {16*pages} images: {time.time() - start_time} seconds")
