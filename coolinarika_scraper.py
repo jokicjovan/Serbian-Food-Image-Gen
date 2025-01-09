@@ -1,20 +1,21 @@
+import argparse
 import os
 import shutil
-import time
+import uuid
 import requests
-from bs4 import BeautifulSoup
 import json
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from selenium import webdriver
+from selenium.common import TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-max_recipes_count = 10
-base_url = "https://www.coolinarika.com"
 chrome_options = Options()
 chrome_options.add_argument("--headless")
-driver = webdriver.Chrome(options=chrome_options)
+
 
 class Dish:
     def __init__(self, name=None, ingredients=None, preparation=None, image_path=None):
@@ -71,53 +72,57 @@ class Dish:
 
 
 def fetch_recipe_data(url):
-    driver.get(url)
-    WebDriverWait(driver, 10).until(
-        EC.visibility_of_element_located((By.CSS_SELECTOR, 'picture img'))
-    )
+    # Init new driver
+    driver = webdriver.Chrome(options=chrome_options)
+    try:
+        # Go to the url and wait for image to load
+        driver.get(url)
+        WebDriverWait(driver, 10).until(
+            EC.visibility_of_element_located((By.CSS_SELECTOR, 'picture img'))
+        )
 
-    # parse page with executed javascript
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
+        # parse page with executed javascript
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
 
-    # Extract name
-    name = soup.find('h1', class_='headTitle').text.strip()
+        # Extract name
+        name = soup.find('h1', class_='headTitle').text.strip()
 
-    # Extract ingredients
-    ingredients_content = soup.find('div', class_='ingredientsContent')
-    ingredients_group_items = ingredients_content.find_all('div', class_='groupItems')
-    ingredients = []
-    for group in ingredients_group_items:
-        items = group.find_all('div')
-        for item in items:
-            ingredient_text = item.get_text()
-            if ingredient_text != '':
-                ingredients.append(ingredient_text)
+        # Extract ingredients
+        ingredients_content = soup.find('div', class_='ingredientsContent')
+        ingredients_group_items = ingredients_content.find_all('div', class_='groupItems')
+        ingredients = [
+            item.get_text().strip()
+            for group in ingredients_group_items
+            for item in group.find_all('div') if item.get_text().strip()
+        ]
 
-    # Extract preparation steps
-    preparation_section = soup.find('div', class_='sectionContent')
-    preparation_group_items = preparation_section.find_all('div', class_='groupItems')
-    preparation_steps = []
-    for group in preparation_group_items:
-        items = group.find_all('div', recursive=False)
-        for item in items:
-            preparation_step_text = item.get_text()
-            if preparation_step_text != '':
-                preparation_steps.append(preparation_step_text)
+        # Extract preparation steps
+        preparation_section = soup.find('div', class_='sectionContent')
+        preparation_group_items = preparation_section.find_all('div', class_='groupItems')
+        preparation_steps = [
+            item.get_text().strip()
+            for group in preparation_group_items
+            for item in group.find_all('div', recursive=False) if item.get_text().strip()
+        ]
 
-    # Extract image URL
-    image_div = soup.find('div', class_='headMain_assetImage')
-    picture_tag = image_div.find('picture')
-    img_tag = picture_tag.find('img')
-    image_url = img_tag.get('src')
+        # Extract image URL
+        image_div = soup.find('div', class_='headMain_assetImage')
+        picture_tag = image_div.find('picture')
+        img_tag = picture_tag.find('img')
+        image_url = img_tag.get('src')
 
-    # Download the image
-    image_name = name.replace(" ", "_").lower() + ".jpg"
-    image_path = os.path.join('data_coolinarika/images/', image_name)
-    download_and_save_image(image_url, image_path)
+        # Download the image
+        image_name = str(uuid.uuid4()) + ".jpg"
+        image_path = os.path.join('data_coolinarika/images/', image_name)
+        download_and_save_image(image_url, image_path)
 
-    # Create a Dish object with the scraped data
-    dish = Dish(name=name, ingredients=ingredients, preparation=preparation_steps, image_path=image_path)
-    return dish
+        # Create a Dish object with the scraped data
+        return Dish(name=name, ingredients=ingredients, preparation=preparation_steps, image_path=image_path)
+    except Exception as e:
+        print(f"Error fetching {url}: {e}")
+        return None
+    finally:
+        driver.quit()
 
 
 def download_and_save_image(url, path):
@@ -126,52 +131,83 @@ def download_and_save_image(url, path):
     with open(path, 'wb') as f:
         f.write(response.content)
 
+def scrape_recipes_parallel(recipe_urls, recipes_cutoff, max_workers=5):
+    dishes = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {executor.submit(fetch_recipe_data, url): url for url in recipe_urls}
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                dish = future.result()
+                if dish:
+                    dishes.append(dish)
+                    if len(dishes) >= recipes_cutoff:
+                        break
+            except Exception as e:
+                print(f"Error processing {url}: {e}")
+    return dishes
 
-def scrape_listing_page(listing_url):
-    # Go to the listing page
-    driver.get(listing_url)
 
-    # Scroll down until we reach the bottom of the page
-    last_height = driver.execute_script("return document.body.scrollHeight")
 
-    # Track the initial number of 'cardInner' elements
-    initial_card_count = len(driver.find_elements(By.CSS_SELECTOR, 'a.cardInner'))
-    while True:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+def scrape_listing_page(base_url, listing_url, recipes_cutoff):
+    # Init new driver
+    driver = webdriver.Chrome(options=chrome_options)
 
-        # Wait for the page to load new content
-        time.sleep(1)
+    try:
+        # Go to the listing page
+        driver.get(listing_url)
 
-        # Track the new number of 'cardInner' elements
-        new_card_count = len(driver.find_elements(By.CSS_SELECTOR, 'a.cardInner'))
+        # Scroll down until we reach the bottom of the page
+        last_height = driver.execute_script("return document.body.scrollHeight")
 
-        # If no new elements are added, we assume we've reached the bottom
-        if new_card_count == initial_card_count or new_card_count >= max_recipes_count:
-            break
+        # Track the initial number of recipe cards
+        initial_card_count = len(driver.find_elements(By.CSS_SELECTOR, 'a.cardInner'))
 
-        # Update the count for the next iteration
-        initial_card_count = new_card_count
+        while True:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
 
-        # Get new height to check if we've reached the bottom
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:  # Stop if we have reached the bottom
-            break
-        last_height = new_height
+            # Wait for new recipe cards to load
+            try:
+                WebDriverWait(driver, 10).until(
+                    lambda d: len(d.find_elements(By.CSS_SELECTOR, 'a.cardInner')) > initial_card_count
+                )
+            except TimeoutException:
+                # Bottom is reached
+                break
 
-    # Now that we've scrolled, get the page source
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
+            # Track the new number of recipe cards
+            new_card_count = len(driver.find_elements(By.CSS_SELECTOR, 'a.cardInner'))
 
-    # Extract the recipe links
-    recipe_links = soup.find_all('a', {'class': 'cardInner'})
-    recipe_urls = [link['href'] for link in recipe_links]
-    full_urls = [base_url + url for url in recipe_urls]
-    return full_urls
+            # If enough recipes are loaded, stop
+            if new_card_count >= recipes_cutoff:
+                break
+
+            # Update the count for the next iteration
+            initial_card_count = new_card_count
+
+            # Get new height to check if we've reached the bottom
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:  # Stop if we have reached the bottom
+                break
+            last_height = new_height
+
+        # Get the page source
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # Extract the recipe links
+        recipe_links = soup.find_all('a', {'class': 'cardInner'})
+        recipe_urls = [link['href'] for link in recipe_links]
+        full_urls = [base_url + url for url in recipe_urls]
+        return full_urls
+    finally:
+        driver.quit()
 
 
 def save_to_json(dishes, filename='data_coolinarika/data.json'):
     dishes_data = [dish.make_json() for dish in dishes]
     with open(filename, 'w', encoding="utf-8") as json_file:
         json.dump(dishes_data, json_file, ensure_ascii=False, indent=4)
+
 
 def clear_data_and_images():
     # Clear data.json if it exists
@@ -186,27 +222,43 @@ def clear_data_and_images():
         shutil.rmtree(images_folder_path)
         print(f"Deleted {images_folder_path}")
 
-def main():
+
+def main(base_url, recipes_cutoff):
     # Step 0 (optional): Clear old data
     clear_data_and_images()
 
     # Step 1: Scrape the listing page to get individual recipe URLs
     listing_url = base_url + '/recepti/by-coolinarika'
-    recipe_urls = scrape_listing_page(listing_url)
+    recipe_urls = scrape_listing_page(base_url, listing_url, recipes_cutoff)
 
     # Step 2: For each recipe URL, fetch the full recipe data
-    dishes = []
-    for url in recipe_urls:
-        print(f"Scraping {url}...")
-        dish = fetch_recipe_data(url)
-        if dish:
-            dishes.append(dish)
-            if len(dishes) > max_recipes_count:
-                break
+    dishes = scrape_recipes_parallel(recipe_urls[:recipes_cutoff], recipes_cutoff)
 
     # Step 3: Save the scraped data to a JSON file
     save_to_json(dishes)
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    # Initialize the argument parser
+    parser = argparse.ArgumentParser(description="Scrape recipes from a list of URLs.")
+
+    # Define optional arguments
+    parser.add_argument(
+        "--base-url",
+        type=str,
+        nargs="*",
+        default="https://www.coolinarika.com",
+        help="Base url for scraping recipes.",
+    )
+    parser.add_argument(
+        "--recipes-cutoff",
+        type=int,
+        default=10000,
+        help="Maximum number of recipes to scrape.",
+    )
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Pass parsed arguments to the main function
+    main(args.base_url, args.recipes_cutoff)
