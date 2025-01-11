@@ -1,6 +1,7 @@
 import argparse
 import os
 import shutil
+import time
 import uuid
 import requests
 import json
@@ -131,21 +132,30 @@ def download_and_save_image(url, path):
     with open(path, 'wb') as f:
         f.write(response.content)
 
-def scrape_recipes_parallel(recipe_urls, recipes_cutoff, max_workers=5):
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def scrape_recipes_parallel(recipe_urls, max_workers=10):
     dishes = []
+    processed_urls = set()  # To track processed URLs
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_url = {executor.submit(fetch_recipe_data, url): url for url in recipe_urls}
+        future_to_url = {executor.submit(fetch_recipe_data, url): url for url in set(recipe_urls)}
         for future in as_completed(future_to_url):
             url = future_to_url[future]
             try:
+                if url in processed_urls:
+                    continue  # Skip already processed URLs
+
                 dish = future.result()
-                if dish:
+                if dish and dish not in dishes:  # Check for duplicates at the dish level
                     dishes.append(dish)
-                    if len(dishes) >= recipes_cutoff:
-                        break
+                    processed_urls.add(url)  # Mark URL as processed
+
             except Exception as e:
                 print(f"Error processing {url}: {e}")
+
     return dishes
+
 
 
 
@@ -164,6 +174,7 @@ def scrape_listing_page(base_url, listing_url, recipes_cutoff):
         initial_card_count = len(driver.find_elements(By.CSS_SELECTOR, 'a.cardInner'))
 
         while True:
+            time.sleep(1)
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
 
             # Wait for new recipe cards to load
@@ -232,7 +243,7 @@ def main(base_url, recipes_cutoff):
     recipe_urls = scrape_listing_page(base_url, listing_url, recipes_cutoff)
 
     # Step 2: For each recipe URL, fetch the full recipe data
-    dishes = scrape_recipes_parallel(recipe_urls[:recipes_cutoff], recipes_cutoff)
+    dishes = scrape_recipes_parallel(recipe_urls[:recipes_cutoff])
 
     # Step 3: Save the scraped data to a JSON file
     save_to_json(dishes)
@@ -253,7 +264,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--recipes-cutoff",
         type=int,
-        default=10000,
+        default=100,
         help="Maximum number of recipes to scrape.",
     )
 

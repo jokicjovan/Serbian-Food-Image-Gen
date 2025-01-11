@@ -1,3 +1,6 @@
+import uuid
+from uuid import uuid4
+
 import requests
 import time
 from bs4 import BeautifulSoup
@@ -79,7 +82,7 @@ def process_page(pageCounter):
             dish.name = li_dish.find('a').text
 
             img = li_dish.find('img')
-            dish.image_path = image_folder + dish.name.replace(" ", "_").lower() + ".jpg"
+            dish.image_path = image_folder + str(uuid.uuid4()) + ".jpg"
             image = Image.open(requests.get(main_url + img['src'], stream=True).raw)
             image.save("data_recepti/" + dish.image_path)
 
@@ -97,7 +100,7 @@ def process_page(pageCounter):
         print(f"Failed to retrieve the page. Status code: {response.status_code}")
 
 start_time = time.time()
-pages = 10
+pages = 606
 
 with ThreadPoolExecutor() as executor:
     executor.map(process_page, range(pages))
