@@ -1,22 +1,25 @@
 import argparse
 import os
 import shutil
+import threading
 import time
 import uuid
 import requests
 import json
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from selenium import webdriver
 from selenium.common import TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 chrome_options = Options()
 chrome_options.add_argument("--headless")
 dish_counter=0
+dishes = {
+    "dishes": []
+}
+dishes_lock = threading.Lock()
 
 
 class Dish:
@@ -92,7 +95,9 @@ def fetch_recipe_data(url):
         image_name = str(uuid.uuid4()) + ".jpg"
         image_path = os.path.join('data_coolinarika/images/', image_name)
         download_and_save_image(image_url, image_path)
-        return Dish(name=name, ingredients=ingredients, preparation=preparation_steps, image_path=image_path)
+        dish= Dish(name=name, ingredients=ingredients, preparation=preparation_steps, image_path=image_path)
+        with dishes_lock:
+            dishes["dishes"].append(dish.make_json())
     except Exception as e:
         print(f"Error fetching {url}: {e}")
         return None
@@ -106,27 +111,9 @@ def download_and_save_image(url, path):
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def scrape_recipes_parallel(recipe_urls, max_workers=10):
-    dishes = []
-    processed_urls = set()  # To track processed URLs
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_url = {executor.submit(fetch_recipe_data, url): url for url in set(recipe_urls)}
-        for future in as_completed(future_to_url):
-            url = future_to_url[future]
-            try:
-                if url in processed_urls:
-                    continue  # Skip already processed URLs
-
-                dish = future.result()
-                if dish and dish not in dishes:  # Check for duplicates at the dish level
-                    dishes.append(dish)
-                    processed_urls.add(url)  # Mark URL as processed
-
-            except Exception as e:
-                print(f"Error processing {url}: {e}")
-
-    return dishes
+def scrape_recipes_parallel(recipe_urls):
+    with ThreadPoolExecutor() as executor:
+        executor.map(fetch_recipe_data, recipe_urls)
 
 
 
@@ -187,10 +174,10 @@ def scrape_listing_page(base_url, listing_url):
         driver.quit()
 
 
-def save_to_json(dishes, filename='data_coolinarika/data.json'):
-    dishes_data = [dish.make_json() for dish in dishes]
+def save_to_json(filename='data_coolinarika/data.json'):
+    print(dishes)
     with open(filename, 'w', encoding="utf-8") as json_file:
-        json.dump(dishes_data, json_file, ensure_ascii=False, indent=4)
+        json_file.write(str(dishes).replace("'", "\""))
 
 
 def clear_data_and_images():
@@ -209,7 +196,6 @@ def clear_data_and_images():
 def read_links_from_file(file_path):
     try:
         with open(file_path, 'r') as file:
-            # Read lines and strip newline characters
             links = [line.strip() for line in file if line.strip()]
         return links
     except Exception as e:
@@ -221,17 +207,19 @@ def main(base_url):
     # Step 0 (optional): Clear old data
     clear_data_and_images()
 
-    # Step 1: Scrape the listing page to get individual recipe URLs
+    # Step 1: Scrape the listing page to get individual recipe URLs and save it to file
     #listing_url = base_url + '/recepti/by-coolinarika'
     #recipe_urls = scrape_listing_page(base_url, listing_url)
 
-    file_path = 'data_coolinarika/links.txt'  # Replace with your file path
+    # Step 2: Read links from file
+    file_path = 'data_coolinarika/links.txt'
     recipe_urls = read_links_from_file(file_path)
-    # Step 2: For each recipe URL, fetch the full recipe data
+
+    # Step 3: For each recipe URL, fetch the full recipe data
     dishes = scrape_recipes_parallel(recipe_urls)
 
-    # Step 3: Save the scraped data to a JSON file
-    save_to_json(dishes)
+    # Step 4: Save the scraped data to a JSON file
+    save_to_json()
 
 
 
@@ -247,12 +235,6 @@ if __name__ == "__main__":
         nargs="*",
         default="https://www.coolinarika.com",
         help="Base url for scraping recipes.",
-    )
-    parser.add_argument(
-        "--recipes-cutoff",
-        type=int,
-        default=7000,
-        help="Maximum number of recipes to scrape.",
     )
 
     # Parse arguments
