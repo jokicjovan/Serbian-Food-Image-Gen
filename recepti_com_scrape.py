@@ -1,3 +1,4 @@
+import re
 import uuid
 from uuid import uuid4
 
@@ -79,7 +80,7 @@ def process_page(pageCounter):
         li_dishes = ul.find_all('li')
         for li_dish in li_dishes:
             dish = Dish()
-            dish.name = li_dish.find('a').text
+            dish.name = li_dish.find('a').text.replace("\"", "").replace("'","")
 
             img = li_dish.find('img')
             dish.image_path = image_folder + str(uuid.uuid4()) + ".jpg"
@@ -90,10 +91,9 @@ def process_page(pageCounter):
             dish_response = requests.get(dish_url)
             dish_soup = BeautifulSoup(dish_response.content, 'html.parser')
             li_ingridients = dish_soup.findAll('li', itemprop='ingredients')
-            dish.ingredients = [li.text.replace("\n", "").strip().replace("\"", "") for li in li_ingridients]
+            dish.ingredients = [re.sub(r'\xa0', '', li.text.replace("\n", "").strip().replace("\"", "").replace("'","").replace('\xad','')) for li in li_ingridients]
             li_instructions = dish_soup.findAll('li', itemprop='recipeInstructions')
-            dish.preparation = [li.text.replace("\n", "").strip().replace("\"", "") for li in li_instructions]
-            
+            dish.preparation = [re.sub(r'\xa0', '', li.text.replace("\n", "").strip().replace("\"", "").replace("'","").replace('\xad','')) for li in li_instructions] 
             with dishes_lock:
                 dishes["dishes"].append(dish.make_json())
     else:
